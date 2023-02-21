@@ -6,8 +6,12 @@ pub const Node = struct {
     pub const SpawnOptions = struct {
         config: ?Config = null,
         module: ?Module = null,
+        parameters: ?[]const u8 = null,
     };
-    pub fn spawn(self: Node, export_name: []const u8, options: SpawnOptions) !Process {
+    pub fn spawn(self: Node, export_name: []const u8, parameters: anytype, options: SpawnOptions) !Process {
+        return _spawn(self, export_name, &serialize_parameters(parameters), options);
+    }
+    fn _spawn(self: Node, export_name: []const u8, parameters: ?[]const u8, options: SpawnOptions) !Process {
         var config_id: i64 = 0;
         if (options.config) |config| {
             config_id = @intCast(i64, config.config_id);
@@ -16,6 +20,12 @@ pub const Node = struct {
         if (options.module) |module| {
             module_id = @intCast(i64, module.module_id);
         }
+        var parameters_ptr: u32 = 0;
+        var parameters_len: u32 = 0;
+        if (parameters) |params| {
+            parameters_len = params.len;
+            parameters_ptr = if (parameters_len > 0) @ptrToInt(params.ptr) else 0;
+        }
         var id: u64 = undefined;
         const result = Internal.Distributed.spawn(
             self.node_id,
@@ -23,8 +33,8 @@ pub const Node = struct {
             module_id,
             @ptrToInt(export_name.ptr),
             export_name.len,
-            0,
-            0,
+            parameters_ptr,
+            parameters_len,
             @ptrToInt(&id),
         );
 
@@ -163,6 +173,20 @@ pub const Message = struct {
     }
     pub fn data_size() u64 {
         return Internal.Message.data_size();
+    }
+    pub fn write_data_buffer(buffer: []const u8) void {
+        const ptr = @ptrToInt(buffer.ptr);
+        const len = buffer.len;
+        const written = Internal.Message.write_data(ptr, len);
+        if (written != len) {
+            @panic("Unable to write all the data to the message");
+        }
+    }
+    pub fn read_data_buffer(buffer: []u8) void {
+        const ptr = @ptrToInt(buffer.ptr);
+        const len = buffer.len;
+        const read = Internal.Message.read_data(ptr, len);
+        return read;
     }
     pub fn write_data(comptime T: type, value: T) void {
         const ptr = @ptrToInt(&value);
@@ -335,8 +359,6 @@ pub const Config = struct {
 pub const Process = struct {
     process_id: u64,
 
-    const Self = @This();
-
     pub fn environment_id() u64 {
         return Internal.Process.environment_id();
     }
@@ -358,16 +380,16 @@ pub const Process = struct {
         };
         Internal.Process.die_when_link_dies(trap_id);
     }
-    pub fn link(self: Self, tag: i64) void {
+    pub fn link(self: Process, tag: i64) void {
         Internal.Process.link(tag, self.process_id);
     }
-    pub fn unlink(self: Self) void {
+    pub fn unlink(self: Process) void {
         Internal.Process.unlink(self.process_id);
     }
-    pub fn kill(self: Self) void {
+    pub fn kill(self: Process) void {
         Internal.Process.kill(self.process_id);
     }
-    pub fn exists(self: Self) bool {
+    pub fn exists(self: Process) bool {
         return Internal.Process.exists(self.process_id) != 0;
     }
 
@@ -400,7 +422,10 @@ pub const Process = struct {
         config: ?Config = null,
         module: ?Module = null,
     };
-    pub fn spawn(export_name: []const u8, options: SpawnOptions) !Self {
+    pub fn spawn(export_name: []const u8, parameters: anytype, options: SpawnOptions) !Process {
+        return _spawn(export_name, &serialize_parameters(parameters), options);
+    }
+    fn _spawn(export_name: []const u8, parameters: ?[]const u8, options: SpawnOptions) !Process {
         var config_id: i64 = -1;
         if (options.config) |config| {
             config_id = @intCast(i64, config.config_id);
@@ -409,6 +434,12 @@ pub const Process = struct {
         if (options.module) |module| {
             module_id = @intCast(i64, module.module_id);
         }
+        var parameters_ptr: u32 = 0;
+        var parameters_len: u32 = 0;
+        if (parameters) |params| {
+            parameters_len = params.len;
+            parameters_ptr = if (parameters_len > 0) @ptrToInt(params.ptr) else 0;
+        }
         var id: u64 = undefined;
         const result = Internal.Process.spawn(
             options.link,
@@ -416,8 +447,8 @@ pub const Process = struct {
             module_id,
             @ptrToInt(export_name.ptr),
             export_name.len,
-            0,
-            0,
+            parameters_ptr,
+            parameters_len,
             @ptrToInt(&id),
         );
         if (result == 0) {
@@ -495,9 +526,7 @@ pub const Registry = struct {
 pub const Timer = struct {
     timer_id: u64,
 
-    const Self = @This();
-
-    pub fn send_after(process: Process, delay: u64) Self {
+    pub fn send_after(process: Process, delay: u64) Timer {
         const timer_id = Internal.Timer.send_after(process.process_id, delay);
         return .{
             .timer_id = timer_id,
@@ -505,7 +534,7 @@ pub const Timer = struct {
     }
 
     // returns true if timer found, false if it is expired or canceled.
-    pub fn cancel(self: Self) bool {
+    pub fn cancel(self: Timer) bool {
         const result = Internal.Timer.cancel_timer(self.timer_id);
         return result == 1;
     }
@@ -517,13 +546,37 @@ pub const Version = struct {
     }
 
     pub fn minor() u32 {
-        return Internal.Version.major();
+        return Internal.Version.minor();
     }
 
     pub fn patch() u32 {
-        return Internal.Version.major();
+        return Internal.Version.patch();
     }
 };
+
+fn parameters_size(comptime ArgsType: type) usize {
+    const fields_info = @typeInfo(ArgsType).Struct.fields;
+    return fields_info.len * 17;
+}
+
+pub fn serialize_parameters(args: anytype) [parameters_size(@TypeOf(args))]u8 {
+    const ArgsType = @TypeOf(args);
+    var result: [parameters_size(ArgsType)]u8 = undefined;
+    var buffer = std.io.fixedBufferStream(&result);
+    const stream = buffer.writer();
+    const fields_info = @typeInfo(ArgsType).Struct.fields;
+    inline for (fields_info) |field| {
+        const type_code: u8 = switch (field.type) {
+            i32 => 0x7F,
+            i64 => 0x7E,
+            // TODO: support 0x7B v128
+            else => @compileError("Only i32 and i64 are currently supported, found " ++ @typeName(field.type)),
+        };
+        stream.writeByte(type_code) catch unreachable;
+        stream.writeIntLittle(i128, @field(args, field.name)) catch unreachable;
+    }
+    return result;
+}
 
 const Internal = struct {
     const Error = struct {

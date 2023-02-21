@@ -43,10 +43,12 @@ fn sendTodo(process: Process, action: todo) void {
     Message.send(process) catch unreachable;
 }
 
-pub export fn child1() void {
+pub export fn child1(p1: i32) void {
+    std.debug.print("Child1 parameter 1 is {}\n", .{p1});
+
     whoami();
 
-    const id2 = Process.spawn("child2", .{ .link = 5 }) catch unreachable;
+    const id2 = Process.spawn("child2", .{}, .{ .link = 5 }) catch unreachable;
 
     sendTodo(id2, .whoami);
     sendTodo(id2, .print);
@@ -75,7 +77,7 @@ pub fn main() !void {
 
     config.set_can_spawn_processes(true);
 
-    const id = try Process.spawn("child1", .{
+    const id = try Process.spawn("child1", .{@as(i32, 42)}, .{
         .config = config,
     });
     std.debug.print("child is {}\n", .{id.process_id});
