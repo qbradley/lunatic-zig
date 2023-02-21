@@ -40,7 +40,7 @@ pub export fn child2() void {
 fn sendTodo(process: Process, action: todo) void {
     Message.create_data(0, @sizeOf(u32));
     Message.write_data(u32, @enumToInt(action));
-    Message.send(process);
+    Message.send(process) catch unreachable;
 }
 
 pub export fn child1() void {
@@ -61,6 +61,15 @@ pub export fn child1() void {
 }
 
 pub fn main() !void {
+    std.debug.print(
+        "Lunatic version {}.{}.{}\n",
+        .{
+            lunatic.Version.major(),
+            lunatic.Version.minor(),
+            lunatic.Version.patch(),
+        },
+    );
+
     var config = try Process.create_config();
     defer config.deinit();
 
