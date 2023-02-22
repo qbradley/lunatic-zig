@@ -18,7 +18,8 @@ pub export fn child2() void {
             .DataMessage => {
                 const data_size = Message.data_size();
                 std.debug.print("Message of size {}\n", .{data_size});
-                const raw_data = Message.read_data(u32);
+                const stream = lunatic.MessageReader{};
+                const raw_data = stream.reader().readIntLittle(u32) catch unreachable;
                 switch (@intToEnum(todo, raw_data)) {
                     .panic => @panic("I died"),
                     .print => std.debug.print("Printing from a child\n", .{}),
@@ -38,9 +39,9 @@ pub export fn child2() void {
 }
 
 fn sendTodo(process: Process, action: todo) void {
-    Message.create_data(0, @sizeOf(u32));
-    Message.write_data(u32, @enumToInt(action));
-    Message.send(process) catch unreachable;
+    var stream = Message.create_message_stream(0, @sizeOf(u32));
+    stream.writer().writeIntLittle(u32, @enumToInt(action)) catch unreachable;
+    stream.send(process) catch unreachable;
 }
 
 pub export fn child1(p1: i32) void {

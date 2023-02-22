@@ -161,7 +161,80 @@ pub const Distributed = struct {
     }
 };
 
+pub const MessageWriter = struct {
+    pub const Error = error{};
+    pub const Writer = std.io.Writer(MessageWriter, Error, write);
+    pub fn writer(self: MessageWriter) Writer {
+        return .{ .context = self };
+    }
+    pub fn write(self: MessageWriter, bytes: []const u8) Error!usize {
+        _ = self;
+        const ptr = @ptrToInt(bytes.ptr);
+        const len = bytes.len;
+        return Internal.Message.write_data(ptr, len);
+    }
+    pub fn send(self: MessageWriter, process: Process) !void {
+        _ = self;
+        try Message.send(process);
+    }
+    pub fn writeModule(self: MessageWriter, module: Module) !void {
+        const index = Message.push_module(module);
+        try self.writer().writeIntLittle(u64, index);
+    }
+    pub fn writeTcpStream(self: MessageWriter, stream_id: u64) !void {
+        const index = Internal.Message.push_tcp_stream(stream_id);
+        try self.writer().writeIntLittle(u64, index);
+    }
+    pub fn writeTlsStream(self: MessageWriter, stream_id: u64) !void {
+        const index = Internal.Message.push_tls_stream(stream_id);
+        try self.writer().writeIntLittle(u64, index);
+    }
+    pub fn writeUdpStream(self: MessageWriter, stream_id: u64) !void {
+        const index = Internal.Message.push_udp_stream(stream_id);
+        try self.writer().writeIntLittle(u64, index);
+    }
+};
+
+pub const MessageReader = struct {
+    pub const Error = error{};
+    pub const Reader = std.io.Reader(MessageReader, Error, read);
+    pub fn reader(self: MessageReader) Reader {
+        return .{ .context = self };
+    }
+    pub fn read(self: MessageReader, dst: []u8) Error!usize {
+        _ = self;
+        const ptr = @ptrToInt(dst.ptr);
+        const len = dst.len;
+        return Internal.Message.read_data(ptr, len);
+    }
+    pub fn forward(self: MessageReader, process: Process) !void {
+        _ = self;
+        Message.seek_data(0);
+        try Message.send(process);
+    }
+    pub fn readModule(self: MessageReader) !Module {
+        const index = try self.reader().readIntLittle(u64);
+        return Message.take_module(index);
+    }
+    pub fn readTcpStream(self: MessageReader) !u64 {
+        const index = try self.reader().readIntLittle(u64);
+        return Internal.Message.take_tcp_stream(index);
+    }
+    pub fn readTlsStream(self: MessageReader) !u64 {
+        const index = try self.reader().readIntLittle(u64);
+        return Internal.Message.take_tls_stream(index);
+    }
+    pub fn readUdpStream(self: MessageReader) !u64 {
+        const index = try self.reader().readIntLittle(u64);
+        return Internal.Message.take_udp_stream(index);
+    }
+};
+
 pub const Message = struct {
+    pub fn create_message_stream(tag: i64, buffer_capacity: u64) MessageWriter {
+        create_data(tag, buffer_capacity);
+        return .{};
+    }
     pub fn create_data(tag: i64, buffer_capacity: u64) void {
         Internal.Message.create_data(tag, buffer_capacity);
     }
