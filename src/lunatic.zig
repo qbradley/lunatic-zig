@@ -658,6 +658,86 @@ pub const Networking = struct {
             Internal.Networking.drop_tcp_stream(self.socket_id);
         }
     };
+    pub const TlsSocket = struct {
+        socket_id: u64,
+
+        pub fn read(self: TlsSocket, buffer: []u8) !usize {
+            var amount: u32 = undefined;
+            const result = Internal.Networking.tls_read(
+                self.socket_id,
+                @ptrToInt(buffer.ptr),
+                buffer.len,
+                @ptrToInt(&amount),
+            );
+            if (result == 0) {
+                if (amount > 0) {
+                    return amount;
+                }
+                return error.EndOfFile;
+            } else {
+                const error_id = amount;
+                std.debug.print("read failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.ReadFailed;
+            }
+        }
+
+        pub fn write(self: TlsSocket, buffer: []const u8) !usize {
+            var amount: u32 = undefined;
+            var iovec: CIOVec = .{ .ptr = buffer.ptr, .len = buffer.len };
+            const result = Internal.Networking.tls_write_vectored(
+                self.socket_id,
+                @ptrToInt(&iovec),
+                1,
+                @ptrToInt(&amount),
+            );
+            if (result == 0) {
+                if (amount > 0) {
+                    return amount;
+                }
+                return error.EndOfFile;
+            } else {
+                const error_id = amount;
+                std.debug.print("write failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.WriteFailed;
+            }
+        }
+
+        pub fn clone(self: TlsSocket) TlsSocket {
+            return .{ .socket_id = Internal.Networking.clone_tls_stream(self.socket_id) };
+        }
+
+        pub fn set_tls_read_timeout(self: TlsSocket, duration: u64) void {
+            Internal.Networking.set_tls_read_timeout(self.socket_id, duration);
+        }
+
+        pub fn set_tls_write_timeout(self: TlsSocket, duration: u64) void {
+            Internal.Networking.set_tls_write_timeout(self.socket_id, duration);
+        }
+
+        pub fn get_tls_read_timeout(self: TlsSocket) u64 {
+            return Internal.Networking.get_tls_read_timeout(self.socket_id);
+        }
+
+        pub fn get_tls_write_timeout(self: TlsSocket) u64 {
+            return Internal.Networking.get_tls_write_timeout(self.socket_id);
+        }
+
+        pub fn flush(self: TlsSocket) !void {
+            var error_id: u64 = undefined;
+            const result = Internal.Networking.tls_flush(self.socket_id, @ptrToInt(&error_id));
+            if (result != 0) {
+                std.debug.print("flush failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.FlushFailed;
+            }
+        }
+
+        pub fn deinit(self: TlsSocket) void {
+            Internal.Networking.drop_tls_stream(self.socket_id);
+        }
+    };
     pub const Listener = struct {
         listener_id: u64,
 
@@ -699,6 +779,49 @@ pub const Networking = struct {
         }
         pub fn deinit(self: Listener) void {
             Internal.Networking.drop_tcp_listener(self.listener_id);
+        }
+    };
+    pub const TlsListener = struct {
+        listener_id: u64,
+
+        pub fn accept(self: Listener) !TlsSocket {
+            var fd: u64 = undefined;
+            var dns_iterator: u64 = undefined;
+            const result = Internal.Networking.tls_accept(
+                self.listener_id,
+                @ptrToInt(&fd),
+                @ptrToInt(&dns_iterator),
+            );
+            if (result == 0) {
+                Internal.Networking.drop_dns_iterator(dns_iterator);
+                return .{ .socket_id = fd };
+            } else {
+                const error_id = fd;
+                std.debug.print("accept failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.BindFailed;
+            }
+        }
+        pub fn local_address(listener: Listener) !Address {
+            var dns_iterator_id: u64 = undefined;
+            const result = Internal.Networking.tls_local_addr(
+                listener.listener_id,
+                @ptrToInt(&dns_iterator_id),
+            );
+            if (result == 0) {
+                var iterator = DnsIterator{ .dns_iterator_id = dns_iterator_id };
+                defer iterator.deinit();
+
+                return iterator.next().?;
+            } else {
+                const error_id = dns_iterator_id;
+                std.debug.print("local_address failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.LocalAddressFailed;
+            }
+        }
+        pub fn deinit(self: Listener) void {
+            Internal.Networking.drop_tls_listener(self.listener_id);
         }
     };
     pub const Address4 = struct {
@@ -857,6 +980,74 @@ pub const Networking = struct {
                 std.debug.print("connect6 failed with error {}\n", .{error_id});
                 Internal.Error.drop(error_id);
                 return error.ConnectFailed;
+            }
+        }
+    };
+    pub const Tls = struct {
+        pub fn bind4(address: [4]u8, port: u32, certs: []const u8, key: []const u8) !TlsListener {
+            var fd: u64 = undefined;
+            const result = Internal.Networking.tls_bind(
+                4,
+                @ptrToInt(&address[0]),
+                port,
+                0,
+                0,
+                @ptrToInt(&fd),
+                @ptrToInt(certs.ptr),
+                certs.len,
+                @ptrToInt(key.ptr),
+                key.len,
+            );
+            if (result == 0) {
+                return .{ .listener_id = fd };
+            } else {
+                const error_id = fd;
+                std.debug.print("bind4 failed with error {}, result {}\n", .{ error_id, result });
+                Internal.Error.drop(error_id);
+                return error.BindFailed;
+            }
+        }
+        pub fn connect(address: []const u8, port: u32, timeout_duration: u64, certs: []const u8) !TlsSocket {
+            var fd: u64 = undefined;
+            const result = Internal.Networking.tls_connect(
+                @ptrToInt(address.ptr),
+                address.len,
+                port,
+                timeout_duration,
+                @ptrToInt(&fd),
+                @ptrToInt(certs.ptr),
+                certs.len,
+            );
+            if (result == 0) {
+                return .{ .socket_id = fd };
+            } else {
+                const error_id = fd;
+                std.debug.print("connect4 failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.ConnectFailed;
+            }
+        }
+        pub fn bind6(address: [16]u8, port: u32, flow_info: u32, scope_id: u32, certs: []const u8, key: []const u8) !TlsListener {
+            var fd: u64 = undefined;
+            const result = Internal.Networking.tls_bind(
+                6,
+                @ptrToInt(address.ptr),
+                port,
+                flow_info,
+                scope_id,
+                @ptrToInt(&fd),
+                @ptrToInt(certs.ptr),
+                certs.len,
+                @ptrToInt(key.ptr),
+                key.len,
+            );
+            if (result == 0) {
+                return .{ .listener_id = fd };
+            } else {
+                const error_id = fd;
+                std.debug.print("bind6 failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.BindFailed;
             }
         }
     };
@@ -1065,9 +1256,26 @@ const Internal = struct {
         pub extern "lunatic::networking" fn get_peek_timeout(stream_id: u64) u64;
         pub extern "lunatic::networking" fn tcp_flush(stream_id: u64, error_id_ptr: u32) u32;
 
+        pub extern "lunatic::networking" fn tls_bind(addr_type: u32, addr_u8_ptr: u32, port: u32, flow_info: u32, scope_id: u32, id_u64_ptr: u32, certs_array_ptr: u32, certs_array_len: u32, keys_array_ptr: u32, keys_array_len: u32) u32;
+        pub extern "lunatic::networking" fn tls_local_addr(tls_listener_id: u64, id_u64_ptr: u32) u32;
+        pub extern "lunatic::networking" fn tls_accept(listener_id: u64, id_u64_ptr: u32, socket_addr_id_ptr: u32) u32;
+        pub extern "lunatic::networking" fn tls_connect(addr_str_ptr: u32, addr_str_len: u32, port: u32, timeout_duration: u64, id_u64_ptr: u32, certs_array_ptr: u32, certs_array_len: u32) u32;
+        pub extern "lunatic::networking" fn drop_tls_stream(tls_stream_id: u64) void;
+        pub extern "lunatic::networking" fn drop_tls_listener(tls_listener_id: u64) void;
+        pub extern "lunatic::networking" fn clone_tls_stream(tls_stream_id: u64) u64;
+        pub extern "lunatic::networking" fn tls_read(stream_id: u64, buffer_ptr: u32, buffer_len: u32, opaque_ptr: u32) u32;
+        pub extern "lunatic::networking" fn tls_write_vectored(stream_id: u64, ciovec_array_ptr: u32, ciovec_array_len: u32, opaque_ptr: u32) u32;
+        pub extern "lunatic::networking" fn set_tls_read_timeout(stream_id: u64, duration: u64) void;
+        pub extern "lunatic::networking" fn set_tls_write_timeout(stream_id: u64, duration: u64) void;
+        pub extern "lunatic::networking" fn get_tls_read_timeout(stream_id: u64) u64;
+        pub extern "lunatic::networking" fn get_tls_write_timeout(stream_id: u64) u64;
+        pub extern "lunatic::networking" fn tls_flush(stream_id: u64, error_id_ptr: u32) u32;
+
         pub extern "lunatic::networking" fn resolve(name_str_ptr: u32, name_str_len: u32, timeout_duration: u64, id_u64_ptr: u32) u32;
         pub extern "lunatic::networking" fn drop_dns_iterator(dns_iter_id: u64) void;
         pub extern "lunatic::networking" fn resolve_next(dns_iter_id: u64, addr_type_u32_ptr: u32, addr_u8_ptr: u32, port_u16_ptr: u32, flow_info_u32_ptr: u32, scope_id_u32_ptr: u32) u32;
+
+        // TODO: udp
     };
     const Registry = struct {
         pub extern "lunatic::registry" fn put(name_str_ptr: u32, name_str_len: u32, node_id: u64, process_id: u64) void;
