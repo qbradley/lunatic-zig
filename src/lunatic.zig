@@ -679,9 +679,12 @@ pub const Networking = struct {
                 return error.BindFailed;
             }
         }
-        pub fn local_address(listener: Listener) Address {
+        pub fn local_address(listener: Listener) !Address {
             var dns_iterator_id: u64 = undefined;
-            const result = Internal.Networking.tcp_local_addr(listener.listener_id, &dns_iterator_id);
+            const result = Internal.Networking.tcp_local_addr(
+                listener.listener_id,
+                @ptrToInt(&dns_iterator_id),
+            );
             if (result == 0) {
                 var iterator = DnsIterator{ .dns_iterator_id = dns_iterator_id };
                 defer iterator.deinit();
@@ -733,13 +736,17 @@ pub const Networking = struct {
             if (result == 0) {
                 return .{
                     .address = switch (addr_type) {
-                        4 => Address4{
-                            .address = addr[0..3],
+                        4 => .{
+                            .address4 = Address4{
+                                .address = addr[0..4].*,
+                            },
                         },
-                        6 => Address6{
-                            .address = addr[0..15],
-                            .flow_info = flow_info,
-                            .scope_id = scope_id,
+                        6 => .{
+                            .address6 = Address6{
+                                .address = addr[0..16].*,
+                                .flow_info = flow_info,
+                                .scope_id = scope_id,
+                            },
                         },
                         else => unreachable,
                     },
