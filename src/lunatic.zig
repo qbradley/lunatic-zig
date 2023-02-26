@@ -541,10 +541,14 @@ pub const Networking = struct {
         ptr: [*]const u8,
         len: u32,
     };
+    pub const Error = error{
+        Failed,
+        Timeout,
+    };
     pub const Socket = struct {
         socket_id: u64,
 
-        pub fn read(self: Socket, buffer: []u8) !usize {
+        pub fn read(self: Socket, buffer: []u8) Error!usize {
             var amount: u32 = undefined;
             const result = Internal.Networking.tcp_read(
                 self.socket_id,
@@ -553,19 +557,19 @@ pub const Networking = struct {
                 @ptrToInt(&amount),
             );
             if (result == 0) {
-                if (amount > 0) {
-                    return amount;
-                }
-                return error.EndOfFile;
-            } else {
+                return amount;
+            } else if (result == 1) {
                 const error_id = amount;
-                std.debug.print("read failed with error {}\n", .{error_id});
                 Internal.Error.drop(error_id);
-                return error.ReadFailed;
+                return error.Failed;
+            } else if (result == 9027) {
+                return error.Timeout;
+            } else {
+                unreachable;
             }
         }
 
-        pub fn peek(self: Socket, buffer: []u8) !usize {
+        pub fn peek(self: Socket, buffer: []u8) Error!usize {
             var amount: u32 = undefined;
             const result = Internal.Networking.tcp_peek(
                 self.socket_id,
@@ -574,19 +578,19 @@ pub const Networking = struct {
                 @ptrToInt(&amount),
             );
             if (result == 0) {
-                if (amount > 0) {
-                    return amount;
-                }
-                return error.EndOfFile;
-            } else {
+                return amount;
+            } else if (result == 1) {
                 const error_id = amount;
-                std.debug.print("peek failed with error {}\n", .{error_id});
                 Internal.Error.drop(error_id);
-                return error.PeekFailed;
+                return error.Failed;
+            } else if (result == 9027) {
+                return error.Timeout;
+            } else {
+                unreachable;
             }
         }
 
-        pub fn write(self: Socket, buffer: []const u8) !usize {
+        pub fn write(self: Socket, buffer: []const u8) Error!usize {
             var amount: u32 = undefined;
             var iovec: CIOVec = .{ .ptr = buffer.ptr, .len = buffer.len };
             const result = Internal.Networking.tcp_write_vectored(
@@ -596,15 +600,30 @@ pub const Networking = struct {
                 @ptrToInt(&amount),
             );
             if (result == 0) {
-                if (amount > 0) {
-                    return amount;
-                }
-                return error.EndOfFile;
-            } else {
+                return amount;
+            } else if (result == 1) {
                 const error_id = amount;
-                std.debug.print("write failed with error {}\n", .{error_id});
                 Internal.Error.drop(error_id);
-                return error.WriteFailed;
+                return error.Failed;
+            } else if (result == 9027) {
+                return error.Timeout;
+            } else {
+                unreachable;
+            }
+        }
+
+        pub fn flush(self: Socket) Error!void {
+            var error_id: u64 = undefined;
+            const result = Internal.Networking.tcp_flush(self.socket_id, @ptrToInt(&error_id));
+            if (result == 0) {
+                return;
+            } else if (result == 1) {
+                Internal.Error.drop(error_id);
+                return error.Failed;
+            } else if (result == 9027) {
+                return error.Timeout;
+            } else {
+                unreachable;
             }
         }
 
@@ -626,16 +645,6 @@ pub const Networking = struct {
 
         pub fn get_peek_timeout(self: Socket) u64 {
             return Internal.Networking.get_peek_timeout(self.socket_id);
-        }
-
-        pub fn flush(self: Socket) !void {
-            var error_id: u64 = undefined;
-            const result = Internal.Networking.tcp_flush(self.socket_id, @ptrToInt(&error_id));
-            if (result != 0) {
-                std.debug.print("flush failed with error {}\n", .{error_id});
-                Internal.Error.drop(error_id);
-                return error.FlushFailed;
-            }
         }
 
         pub fn peer_address(socket: Socket) Address {
