@@ -12,9 +12,14 @@ pub fn build(b: *std.Build) void {
         .preferred_optimize_mode = .ReleaseSmall,
     });
 
+    b.addModule(.{
+        .name = "lunatic-zig",
+        .source_file = .{ .path = "src/lunatic.zig" },
+    });
+
     const exe = b.addExecutable(.{
         .name = "lunatic-test",
-        .root_source_file = .{ .path = "src/main.zig" },
+        .root_source_file = .{ .path = "test/main.zig" },
         .target = target,
         .optimize = optimize,
         .linkage = .dynamic,
@@ -23,6 +28,7 @@ pub fn build(b: *std.Build) void {
         "child1",
         "child2",
     };
+    exe.addModule("lunatic-zig", b.modules.get("lunatic-zig").?);
     exe.install();
 
     const run_cmd = b.addSystemCommand(&.{
@@ -35,17 +41,4 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run the app with lunatic");
     run_step.dependOn(&run_cmd.step);
-
-    // Creates a step for unit testing.
-    const exe_tests = b.addTest(.{
-        .root_source_file = .{ .path = "src/main.zig" },
-        .target = target,
-        .optimize = optimize,
-    });
-
-    // Similar to creating the run step earlier, this exposes a `test` step to
-    // the `zig build --help` menu, providing a way for the user to request
-    // running the unit tests.
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&exe_tests.step);
 }

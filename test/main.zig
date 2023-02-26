@@ -1,5 +1,5 @@
 const std = @import("std");
-const lunatic = @import("lunatic.zig");
+const lunatic = @import("lunatic-zig");
 const Process = lunatic.Process;
 const Message = lunatic.Message;
 
