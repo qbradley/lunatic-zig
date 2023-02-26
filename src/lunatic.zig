@@ -181,8 +181,8 @@ pub const MessageWriter = struct {
         const index = Message.push_module(module);
         try self.writer().writeIntLittle(u64, index);
     }
-    pub fn writeTcpStream(self: MessageWriter, stream_id: u64) !void {
-        const index = Internal.Message.push_tcp_stream(stream_id);
+    pub fn writeTcpStream(self: MessageWriter, socket: Networking.Socket) !void {
+        const index = Internal.Message.push_tcp_stream(socket.socket_id);
         try self.writer().writeIntLittle(u64, index);
     }
     pub fn writeTlsStream(self: MessageWriter, stream_id: u64) !void {
@@ -216,9 +216,10 @@ pub const MessageReader = struct {
         const index = try self.reader().readIntLittle(u64);
         return Message.take_module(index);
     }
-    pub fn readTcpStream(self: MessageReader) !u64 {
+    pub fn readTcpStream(self: MessageReader) !Networking.Socket {
         const index = try self.reader().readIntLittle(u64);
-        return Internal.Message.take_tcp_stream(index);
+        const socket_id = Internal.Message.take_tcp_stream(index);
+        return .{ .socket_id = socket_id };
     }
     pub fn readTlsStream(self: MessageReader) !u64 {
         const index = try self.reader().readIntLittle(u64);
@@ -535,6 +536,325 @@ pub const Process = struct {
     }
 };
 
+pub const Networking = struct {
+    const CIOVec = struct {
+        ptr: [*]const u8,
+        len: u32,
+    };
+    pub const Socket = struct {
+        socket_id: u64,
+
+        pub fn read(self: Socket, buffer: []u8) !usize {
+            var amount: u32 = undefined;
+            const result = Internal.Networking.tcp_read(
+                self.socket_id,
+                @ptrToInt(buffer.ptr),
+                buffer.len,
+                @ptrToInt(&amount),
+            );
+            if (result == 0) {
+                if (amount > 0) {
+                    return amount;
+                }
+                return error.EndOfFile;
+            } else {
+                const error_id = amount;
+                std.debug.print("read failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.ReadFailed;
+            }
+        }
+
+        pub fn peek(self: Socket, buffer: []u8) !usize {
+            var amount: u32 = undefined;
+            const result = Internal.Networking.tcp_peek(
+                self.socket_id,
+                @ptrToInt(buffer.ptr),
+                buffer.len,
+                @ptrToInt(&amount),
+            );
+            if (result == 0) {
+                if (amount > 0) {
+                    return amount;
+                }
+                return error.EndOfFile;
+            } else {
+                const error_id = amount;
+                std.debug.print("peek failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.PeekFailed;
+            }
+        }
+
+        pub fn write(self: Socket, buffer: []const u8) !usize {
+            var amount: u32 = undefined;
+            var iovec: CIOVec = .{ .ptr = buffer.ptr, .len = buffer.len };
+            const result = Internal.Networking.tcp_write_vectored(
+                self.socket_id,
+                @ptrToInt(&iovec),
+                1,
+                @ptrToInt(&amount),
+            );
+            if (result == 0) {
+                if (amount > 0) {
+                    return amount;
+                }
+                return error.EndOfFile;
+            } else {
+                const error_id = amount;
+                std.debug.print("write failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.WriteFailed;
+            }
+        }
+
+        pub fn clone(self: Socket) Socket {
+            return .{ .socket_id = Internal.Networking.clone_tcp_stream(self.socket_id) };
+        }
+
+        pub fn set_read_timeout(self: Socket, duration: u64) void {
+            Internal.Networking.set_read_timeout(self.socket_id, duration);
+        }
+
+        pub fn set_peek_timeout(self: Socket, duration: u64) void {
+            Internal.Networking.set_peek_timeout(self.socket_id, duration);
+        }
+
+        pub fn get_read_timeout(self: Socket) u64 {
+            return Internal.Networking.get_read_timeout(self.socket_id);
+        }
+
+        pub fn get_peek_timeout(self: Socket) u64 {
+            return Internal.Networking.get_peek_timeout(self.socket_id);
+        }
+
+        pub fn flush(self: Socket) !void {
+            var error_id: u64 = undefined;
+            const result = Internal.Networking.tcp_flush(self.socket_id, @ptrToInt(&error_id));
+            if (result != 0) {
+                std.debug.print("flush failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.FlushFailed;
+            }
+        }
+
+        pub fn peer_address(socket: Socket) Address {
+            var dns_iterator_id: u64 = undefined;
+            const result = Internal.Networking.tcp_peer_addr(socket.socket_id, &dns_iterator_id);
+            if (result == 0) {
+                var iterator = DnsIterator{ .dns_iterator_id = dns_iterator_id };
+                defer iterator.deinit();
+
+                return iterator.next().?;
+            } else {
+                const error_id = dns_iterator_id;
+                std.debug.print("peer_address failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.PeerAddressFailed;
+            }
+        }
+
+        pub fn deinit(self: Socket) void {
+            Internal.Networking.drop_tcp_stream(self.socket_id);
+        }
+    };
+    pub const Listener = struct {
+        listener_id: u64,
+
+        pub fn accept(self: Listener) !Socket {
+            var fd: u64 = undefined;
+            var dns_iterator: u64 = undefined;
+            const result = Internal.Networking.tcp_accept(
+                self.listener_id,
+                @ptrToInt(&fd),
+                @ptrToInt(&dns_iterator),
+            );
+            if (result == 0) {
+                Internal.Networking.drop_dns_iterator(dns_iterator);
+                return .{ .socket_id = fd };
+            } else {
+                const error_id = fd;
+                std.debug.print("accept failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.BindFailed;
+            }
+        }
+        pub fn local_address(listener: Listener) Address {
+            var dns_iterator_id: u64 = undefined;
+            const result = Internal.Networking.tcp_local_addr(listener.listener_id, &dns_iterator_id);
+            if (result == 0) {
+                var iterator = DnsIterator{ .dns_iterator_id = dns_iterator_id };
+                defer iterator.deinit();
+
+                return iterator.next().?;
+            } else {
+                const error_id = dns_iterator_id;
+                std.debug.print("local_address failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.LocalAddressFailed;
+            }
+        }
+        pub fn deinit(self: Listener) void {
+            Internal.Networking.drop_tcp_listener(self.listener_id);
+        }
+    };
+    pub const Address4 = struct {
+        address: [4]u8,
+    };
+    pub const Address6 = struct {
+        address: [16]u8,
+        flow_info: u32,
+        scope_id: u32,
+    };
+    pub const Address = struct {
+        address: union(enum) {
+            address4: Address4,
+            address6: Address6,
+        },
+        port: u16,
+    };
+    pub const DnsIterator = struct {
+        dns_iterator_id: u64,
+
+        pub fn next(self: DnsIterator) ?Address {
+            var addr_type: u32 = undefined;
+            var addr: [16]u8 = undefined;
+            var port: u16 = undefined;
+            var flow_info: u32 = undefined;
+            var scope_id: u32 = undefined;
+            const result = Internal.Networking.resolve_next(
+                self.dns_iterator_id,
+                @ptrToInt(&addr_type),
+                @ptrToInt(&addr[0]),
+                @ptrToInt(&port),
+                @ptrToInt(&flow_info),
+                @ptrToInt(&scope_id),
+            );
+            if (result == 0) {
+                return .{
+                    .address = switch (addr_type) {
+                        4 => Address4{
+                            .address = addr[0..3],
+                        },
+                        6 => Address6{
+                            .address = addr[0..15],
+                            .flow_info = flow_info,
+                            .scope_id = scope_id,
+                        },
+                        else => unreachable,
+                    },
+                    .port = port,
+                };
+            } else {
+                return null;
+            }
+        }
+
+        pub fn deinit(self: DnsIterator) void {
+            Internal.Networking.drop_dns_iterator(self.dns_iterator_id);
+        }
+    };
+    pub const Dns = struct {
+        pub fn resolve(name: []const u8, timeout_duration: u64) !DnsIterator {
+            var dns_iterator_id: u64 = undefined;
+            const result = Internal.Networking.resolve(
+                @ptrToInt(name.ptr),
+                name.len,
+                timeout_duration,
+                @ptrToInt(&dns_iterator_id),
+            );
+            if (result == 0) {
+                return .{ .dns_iterator_id = dns_iterator_id };
+            } else {
+                const error_id = dns_iterator_id;
+                std.debug.print("resolve failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.ResolveFailed;
+            }
+        }
+    };
+    pub const Tcp = struct {
+        pub fn bind4(address: [4]u8, port: u32) !Listener {
+            var fd: u64 = undefined;
+            const result = Internal.Networking.tcp_bind(
+                4,
+                @ptrToInt(&address[0]),
+                port,
+                0,
+                0,
+                @ptrToInt(&fd),
+            );
+            if (result == 0) {
+                return .{ .listener_id = fd };
+            } else {
+                const error_id = fd;
+                std.debug.print("bind4 failed with error {}, result {}\n", .{ error_id, result });
+                Internal.Error.drop(error_id);
+                return error.BindFailed;
+            }
+        }
+        pub fn connect4(address: [4]u8, port: u32, timeout_duration: u64) !Socket {
+            var fd: u64 = undefined;
+            const result = Internal.Networking.tcp_connect(
+                4,
+                @ptrToInt(&address[0]),
+                port,
+                0,
+                0,
+                timeout_duration,
+                @ptrToInt(&fd),
+            );
+            if (result == 0) {
+                return .{ .socket_id = fd };
+            } else {
+                const error_id = fd;
+                std.debug.print("connect4 failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.ConnectFailed;
+            }
+        }
+        pub fn bind6(address: [16]u8, port: u32, flow_info: u32, scope_id: u32) !Listener {
+            var fd: u64 = undefined;
+            const result = Internal.Networking.tcp_bind(
+                6,
+                @ptrToInt(address.ptr),
+                port,
+                flow_info,
+                scope_id,
+                @ptrToInt(&fd),
+            );
+            if (result == 0) {
+                return .{ .listener_id = fd };
+            } else {
+                const error_id = fd;
+                std.debug.print("bind6 failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.BindFailed;
+            }
+        }
+        pub fn connect6(address: [16]u8, port: u32, flow_info: u32, scope_id: u32, timeout_duration: u64) !Socket {
+            var fd: u64 = undefined;
+            const result = Internal.Networking.tcp_connect(
+                6,
+                @ptrToInt(&address[0]),
+                port,
+                flow_info,
+                scope_id,
+                timeout_duration,
+                @ptrToInt(&fd),
+            );
+            if (result == 0) {
+                return .{ .socket_id = fd };
+            } else {
+                const error_id = fd;
+                std.debug.print("connect6 failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.ConnectFailed;
+            }
+        }
+    };
+};
+
 pub const Registry = struct {
     pub fn put(name: []const u8, node: Node, process: Process) void {
         Internal.Registry.put(
@@ -719,6 +1039,28 @@ const Internal = struct {
         pub extern "lunatic::process" fn environment_id() u64;
         pub extern "lunatic::process" fn process_id() u64;
         pub extern "lunatic::process" fn sleep_ms(millis: u64) void;
+    };
+    const Networking = struct {
+        pub extern "lunatic::networking" fn tcp_bind(addr_type: u32, addr_u8_ptr: u32, port: u32, flow_info: u32, scope_id: u32, id_u64_ptr: u32) u32;
+        pub extern "lunatic::networking" fn tcp_local_addr(tcp_listener_id: u64, id_u64_ptr: u32) u32;
+        pub extern "lunatic::networking" fn tcp_accept(listener_id: u64, id_u64_ptr: u32, socket_addr_id_ptr: u32) u32;
+        pub extern "lunatic::networking" fn tcp_connect(addr_type: u32, addr_u8_ptr: u32, port: u32, flow_info: u32, scope_id: u32, timeout_duration: u64, id_u64_ptr: u32) u32;
+        pub extern "lunatic::networking" fn tcp_peer_addr(tcp_stream_id: u64, id_u64_ptr: u32) u32;
+        pub extern "lunatic::networking" fn drop_tcp_stream(tcp_stream_id: u64) void;
+        pub extern "lunatic::networking" fn drop_tcp_listener(tcp_listener_id: u64) void;
+        pub extern "lunatic::networking" fn clone_tcp_stream(tcp_stream_id: u64) u64;
+        pub extern "lunatic::networking" fn tcp_peek(stream_id: u64, buffer_ptr: u32, buffer_len: u32, opaque_ptr: u32) u32;
+        pub extern "lunatic::networking" fn tcp_read(stream_id: u64, buffer_ptr: u32, buffer_len: u32, opaque_ptr: u32) u32;
+        pub extern "lunatic::networking" fn tcp_write_vectored(stream_id: u64, ciovec_array_ptr: u32, ciovec_array_len: u32, opaque_ptr: u32) u32;
+        pub extern "lunatic::networking" fn set_read_timeout(stream_id: u64, duration: u64) void;
+        pub extern "lunatic::networking" fn set_peek_timeout(stream_id: u64, duration: u64) void;
+        pub extern "lunatic::networking" fn get_read_timeout(stream_id: u64) u64;
+        pub extern "lunatic::networking" fn get_peek_timeout(stream_id: u64) u64;
+        pub extern "lunatic::networking" fn tcp_flush(stream_id: u64, error_id_ptr: u32) u32;
+
+        pub extern "lunatic::networking" fn resolve(name_str_ptr: u32, name_str_len: u32, timeout_duration: u64, id_u64_ptr: u32) u32;
+        pub extern "lunatic::networking" fn drop_dns_iterator(dns_iter_id: u64) void;
+        pub extern "lunatic::networking" fn resolve_next(dns_iter_id: u64, addr_type_u32_ptr: u32, addr_u8_ptr: u32, port_u16_ptr: u32, flow_info_u32_ptr: u32, scope_id_u32_ptr: u32) u32;
     };
     const Registry = struct {
         pub extern "lunatic::registry" fn put(name_str_ptr: u32, name_str_len: u32, node_id: u64, process_id: u64) void;
