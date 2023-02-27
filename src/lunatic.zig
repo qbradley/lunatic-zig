@@ -545,6 +545,19 @@ pub const Networking = struct {
         Failed,
         Timeout,
     };
+    fn checkResult(result: u32, amount: u32) Error!usize {
+        if (result == 0) {
+            return amount;
+        } else if (result == 1) {
+            const error_id = amount;
+            Internal.Error.drop(error_id);
+            return error.Failed;
+        } else if (result == 9027) {
+            return error.Timeout;
+        } else {
+            unreachable;
+        }
+    }
     pub const Socket = struct {
         socket_id: u64,
 
@@ -556,17 +569,7 @@ pub const Networking = struct {
                 buffer.len,
                 @ptrToInt(&amount),
             );
-            if (result == 0) {
-                return amount;
-            } else if (result == 1) {
-                const error_id = amount;
-                Internal.Error.drop(error_id);
-                return error.Failed;
-            } else if (result == 9027) {
-                return error.Timeout;
-            } else {
-                unreachable;
-            }
+            return try checkResult(result, amount);
         }
 
         pub fn peek(self: Socket, buffer: []u8) Error!usize {
@@ -577,17 +580,7 @@ pub const Networking = struct {
                 buffer.len,
                 @ptrToInt(&amount),
             );
-            if (result == 0) {
-                return amount;
-            } else if (result == 1) {
-                const error_id = amount;
-                Internal.Error.drop(error_id);
-                return error.Failed;
-            } else if (result == 9027) {
-                return error.Timeout;
-            } else {
-                unreachable;
-            }
+            return try checkResult(result, amount);
         }
 
         pub fn write(self: Socket, buffer: []const u8) Error!usize {
@@ -599,32 +592,13 @@ pub const Networking = struct {
                 1,
                 @ptrToInt(&amount),
             );
-            if (result == 0) {
-                return amount;
-            } else if (result == 1) {
-                const error_id = amount;
-                Internal.Error.drop(error_id);
-                return error.Failed;
-            } else if (result == 9027) {
-                return error.Timeout;
-            } else {
-                unreachable;
-            }
+            return try checkResult(result, amount);
         }
 
         pub fn flush(self: Socket) Error!void {
             var error_id: u64 = undefined;
             const result = Internal.Networking.tcp_flush(self.socket_id, @ptrToInt(&error_id));
-            if (result == 0) {
-                return;
-            } else if (result == 1) {
-                Internal.Error.drop(error_id);
-                return error.Failed;
-            } else if (result == 9027) {
-                return error.Timeout;
-            } else {
-                unreachable;
-            }
+            _ = try checkResult(result, error_id);
         }
 
         pub fn clone(self: Socket) Socket {
@@ -670,7 +644,7 @@ pub const Networking = struct {
     pub const TlsSocket = struct {
         socket_id: u64,
 
-        pub fn read(self: TlsSocket, buffer: []u8) !usize {
+        pub fn read(self: TlsSocket, buffer: []u8) Error!usize {
             var amount: u32 = undefined;
             const result = Internal.Networking.tls_read(
                 self.socket_id,
@@ -678,20 +652,10 @@ pub const Networking = struct {
                 buffer.len,
                 @ptrToInt(&amount),
             );
-            if (result == 0) {
-                if (amount > 0) {
-                    return amount;
-                }
-                return error.EndOfFile;
-            } else {
-                const error_id = amount;
-                std.debug.print("read failed with error {}\n", .{error_id});
-                Internal.Error.drop(error_id);
-                return error.ReadFailed;
-            }
+            return try checkResult(result, amount);
         }
 
-        pub fn write(self: TlsSocket, buffer: []const u8) !usize {
+        pub fn write(self: TlsSocket, buffer: []const u8) Error!usize {
             var amount: u32 = undefined;
             var iovec: CIOVec = .{ .ptr = buffer.ptr, .len = buffer.len };
             const result = Internal.Networking.tls_write_vectored(
@@ -700,17 +664,7 @@ pub const Networking = struct {
                 1,
                 @ptrToInt(&amount),
             );
-            if (result == 0) {
-                if (amount > 0) {
-                    return amount;
-                }
-                return error.EndOfFile;
-            } else {
-                const error_id = amount;
-                std.debug.print("write failed with error {}\n", .{error_id});
-                Internal.Error.drop(error_id);
-                return error.WriteFailed;
-            }
+            return try checkResult(result, amount);
         }
 
         pub fn clone(self: TlsSocket) TlsSocket {
@@ -733,14 +687,10 @@ pub const Networking = struct {
             return Internal.Networking.get_tls_write_timeout(self.socket_id);
         }
 
-        pub fn flush(self: TlsSocket) !void {
+        pub fn flush(self: TlsSocket) Error!void {
             var error_id: u64 = undefined;
             const result = Internal.Networking.tls_flush(self.socket_id, @ptrToInt(&error_id));
-            if (result != 0) {
-                std.debug.print("flush failed with error {}\n", .{error_id});
-                Internal.Error.drop(error_id);
-                return error.FlushFailed;
-            }
+            _ = try checkResult(result, error_id);
         }
 
         pub fn deinit(self: TlsSocket) void {
