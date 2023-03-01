@@ -1,4 +1,26 @@
 const std = @import("std");
+const bincode = @import("bincode-zig");
+const Arena = std.heap.ArenaAllocator;
+const Allocator = std.mem.Allocator;
+
+pub export fn lunatic_alloc(size: u32) u32 {
+    const allocator = std.heap.wasm_allocator;
+    const slice = allocator.allocWithOptions(u8, size + 4, 4, null) catch unreachable;
+    const ptr = slice.ptr + 4;
+    std.mem.writeIntLittle(u32, slice[0..4], slice.len);
+    std.debug.print("lunatic_alloc of size {}: {*}\n", .{ size, ptr });
+    return @ptrToInt(slice.ptr + 4);
+}
+
+pub export fn lunatic_free(raw_ptr: u32) void {
+    const allocator = std.heap.wasm_allocator;
+    const ptr = @intToPtr([*]u8, raw_ptr);
+    const original_ptr = ptr - 4;
+    const len = std.mem.readIntLittle(u32, original_ptr[0..4]);
+    const size = len - 4;
+    std.debug.print("lunatic_free of size {}: {*}\n", .{ size, ptr });
+    allocator.free(original_ptr[0..len]);
+}
 
 pub const Node = struct {
     node_id: u64,
@@ -545,19 +567,6 @@ pub const Networking = struct {
         Failed,
         Timeout,
     };
-    fn checkResult(result: u32, amount: u32) Error!usize {
-        if (result == 0) {
-            return amount;
-        } else if (result == 1) {
-            const error_id = amount;
-            Internal.Error.drop(error_id);
-            return error.Failed;
-        } else if (result == 9027) {
-            return error.Timeout;
-        } else {
-            unreachable;
-        }
-    }
     pub const Socket = struct {
         socket_id: u64,
 
@@ -569,7 +578,17 @@ pub const Networking = struct {
                 buffer.len,
                 @ptrToInt(&amount),
             );
-            return try checkResult(result, amount);
+            if (result == 0) {
+                return amount;
+            } else if (result == 1) {
+                const error_id = amount;
+                Internal.Error.drop(error_id);
+                return error.Failed;
+            } else if (result == 9027) {
+                return error.Timeout;
+            } else {
+                unreachable;
+            }
         }
 
         pub fn peek(self: Socket, buffer: []u8) Error!usize {
@@ -580,7 +599,17 @@ pub const Networking = struct {
                 buffer.len,
                 @ptrToInt(&amount),
             );
-            return try checkResult(result, amount);
+            if (result == 0) {
+                return amount;
+            } else if (result == 1) {
+                const error_id = amount;
+                Internal.Error.drop(error_id);
+                return error.Failed;
+            } else if (result == 9027) {
+                return error.Timeout;
+            } else {
+                unreachable;
+            }
         }
 
         pub fn write(self: Socket, buffer: []const u8) Error!usize {
@@ -592,13 +621,32 @@ pub const Networking = struct {
                 1,
                 @ptrToInt(&amount),
             );
-            return try checkResult(result, amount);
+            if (result == 0) {
+                return amount;
+            } else if (result == 1) {
+                const error_id = amount;
+                Internal.Error.drop(error_id);
+                return error.Failed;
+            } else if (result == 9027) {
+                return error.Timeout;
+            } else {
+                unreachable;
+            }
         }
 
         pub fn flush(self: Socket) Error!void {
             var error_id: u64 = undefined;
             const result = Internal.Networking.tcp_flush(self.socket_id, @ptrToInt(&error_id));
-            _ = try checkResult(result, error_id);
+            if (result == 0) {
+                return;
+            } else if (result == 1) {
+                Internal.Error.drop(error_id);
+                return error.Failed;
+            } else if (result == 9027) {
+                return error.Timeout;
+            } else {
+                unreachable;
+            }
         }
 
         pub fn clone(self: Socket) Socket {
@@ -644,7 +692,7 @@ pub const Networking = struct {
     pub const TlsSocket = struct {
         socket_id: u64,
 
-        pub fn read(self: TlsSocket, buffer: []u8) Error!usize {
+        pub fn read(self: TlsSocket, buffer: []u8) !usize {
             var amount: u32 = undefined;
             const result = Internal.Networking.tls_read(
                 self.socket_id,
@@ -652,10 +700,20 @@ pub const Networking = struct {
                 buffer.len,
                 @ptrToInt(&amount),
             );
-            return try checkResult(result, amount);
+            if (result == 0) {
+                if (amount > 0) {
+                    return amount;
+                }
+                return error.EndOfFile;
+            } else {
+                const error_id = amount;
+                std.debug.print("read failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.ReadFailed;
+            }
         }
 
-        pub fn write(self: TlsSocket, buffer: []const u8) Error!usize {
+        pub fn write(self: TlsSocket, buffer: []const u8) !usize {
             var amount: u32 = undefined;
             var iovec: CIOVec = .{ .ptr = buffer.ptr, .len = buffer.len };
             const result = Internal.Networking.tls_write_vectored(
@@ -664,7 +722,17 @@ pub const Networking = struct {
                 1,
                 @ptrToInt(&amount),
             );
-            return try checkResult(result, amount);
+            if (result == 0) {
+                if (amount > 0) {
+                    return amount;
+                }
+                return error.EndOfFile;
+            } else {
+                const error_id = amount;
+                std.debug.print("write failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.WriteFailed;
+            }
         }
 
         pub fn clone(self: TlsSocket) TlsSocket {
@@ -687,10 +755,14 @@ pub const Networking = struct {
             return Internal.Networking.get_tls_write_timeout(self.socket_id);
         }
 
-        pub fn flush(self: TlsSocket) Error!void {
+        pub fn flush(self: TlsSocket) !void {
             var error_id: u64 = undefined;
             const result = Internal.Networking.tls_flush(self.socket_id, @ptrToInt(&error_id));
-            _ = try checkResult(result, error_id);
+            if (result != 0) {
+                std.debug.print("flush failed with error {}\n", .{error_id});
+                Internal.Error.drop(error_id);
+                return error.FlushFailed;
+            }
         }
 
         pub fn deinit(self: TlsSocket) void {
@@ -1073,6 +1145,154 @@ pub const Registry = struct {
     }
 };
 
+pub const Sqlite = struct {
+    pub fn open(filename: []const u8) !Database {
+        var conn_id: u64 = undefined;
+        const result = Internal.Sqlite.open(
+            @ptrToInt(filename.ptr),
+            filename.len,
+            @ptrToInt(&conn_id),
+        );
+        if (result == 0) {
+            return .{
+                .conn_id = conn_id,
+            };
+        } else if (result == 1) {
+            const error_id = conn_id;
+            const string_size = Internal.Error.string_size(error_id);
+            var buffer: [4096]u8 = undefined;
+            Internal.Error.to_string(error_id, @ptrToInt(&buffer[0]));
+            std.debug.print("{s}\n", .{buffer[0..string_size]});
+            Internal.Error.drop(error_id);
+            return error.OpenFailed;
+        } else {
+            unreachable;
+        }
+    }
+    pub const BindKey = union(enum) {
+        None,
+        Numeric: u64,
+        String: []const u8,
+    };
+    pub const BindValue = union(enum) {
+        Null,
+        Blob: []const u8,
+        Text: []const u8,
+        Double: f64,
+        Int: i32,
+        Int64: i64,
+    };
+    pub const BindPair = struct {
+        key: BindKey,
+        value: BindValue,
+    };
+    pub const Statement = struct {
+        statement_id: u64,
+
+        pub fn bind_value(self: Statement, bindings: []const BindPair) !void {
+            var buffer: [4096]u8 = undefined;
+            var stream = std.io.fixedBufferStream(&buffer);
+            try Bincode.serialize(stream.writer(), bindings);
+            const encoded = stream.getWritten();
+            //for (encoded, 0..) |b, i| {
+            //    std.debug.print("{}: {X}\n", .{ i, b });
+            //}
+            Internal.Sqlite.bind_value(
+                self.statement_id,
+                @ptrToInt(encoded.ptr),
+                encoded.len,
+            );
+        }
+
+        pub fn read_row(self: Statement, allocator: Allocator) !Bincode.DeserializeResult([]SqliteValue) {
+            var len: u32 = 0;
+            var raw_ptr = Internal.Sqlite.read_row(self.statement_id, @ptrToInt(&len));
+            defer lunatic_free(raw_ptr);
+            var ptr = @intToPtr([*]const u8, raw_ptr);
+
+            var stream = std.io.fixedBufferStream(ptr[0..len]);
+            return try Bincode.deserialize(stream.reader(), allocator, []SqliteValue);
+        }
+
+        pub fn reset(self: Statement) void {
+            Internal.Sqlite.statement_reset(self.statement_id);
+        }
+
+        pub fn step(self: Statement) bool {
+            const result = Internal.Sqlite.sqlite3_step(self.statement_id);
+            return switch (result) {
+                100 => true,
+                101 => false,
+                else => unreachable,
+            };
+        }
+
+        pub fn deinit(self: Statement) void {
+            Internal.Sqlite.sqlite3_finalize(self.statement_id);
+        }
+    };
+
+    pub const SqliteValue = union(enum) {
+        Null,
+        Blob: []const u8,
+        Text: []const u8,
+        Double: f64,
+        Integer: i64,
+        I64: i64,
+    };
+
+    pub const Bincode = struct {
+        pub fn DeserializeResult(comptime RootT: type) type {
+            return struct {
+                arena: Arena,
+                result: RootT,
+
+                pub fn deinit(self: *@This()) void {
+                    self.arena.deinit();
+                }
+            };
+        }
+        pub fn deserialize(stream: anytype, allocator: Allocator, comptime T: type) !DeserializeResult(T) {
+            var arena = Arena.init(allocator);
+            var result = DeserializeResult(T){
+                .arena = arena,
+                .result = try bincode.deserialize(stream, arena.allocator(), T),
+            };
+            return result;
+        }
+        pub fn serialize(stream: anytype, value: anytype) @TypeOf(stream).Error!void {
+            try bincode.serialize(stream, value);
+        }
+    };
+
+    pub const Database = struct {
+        conn_id: u64,
+
+        pub fn execute(self: Database, exec_str: []const u8) !void {
+            const result = Internal.Sqlite.execute(
+                self.conn_id,
+                @ptrToInt(exec_str.ptr),
+                exec_str.len,
+            );
+            if (result > 0) {
+                std.debug.print("execute failed with error {}\n", .{result});
+                return error.SqliteFailed;
+            }
+        }
+
+        pub fn query_prepare(self: Database, query_str: []const u8) Statement {
+            const statement_id = Internal.Sqlite.query_prepare(
+                self.conn_id,
+                @ptrToInt(query_str.ptr),
+                query_str.len,
+            );
+            return .{
+                .statement_id = statement_id,
+            };
+        }
+    };
+};
+
 pub const Timer = struct {
     timer_id: u64,
 
@@ -1241,6 +1461,22 @@ const Internal = struct {
         pub extern "lunatic::registry" fn get(name_str_ptr: u32, name_str_len: u32, node_id_ptr: u32, process_id_ptr: u32) u32;
         pub extern "lunatic::registry" fn get_or_put_later(name_str_ptr: u32, name_str_len: u32, node_id_ptr: u32, process_id_ptr: u32) u32;
         pub extern "lunatic::registry" fn remove(name_str_ptr: u32, name_str_len: u32) void;
+    };
+    const Sqlite = struct {
+        pub extern "lunatic::sqlite" fn open(path_str_path: u32, path_str_len: u32, connection_id_ptr: u32) u64;
+        pub extern "lunatic::sqlite" fn query_prepare(conn_id: u64, query_str_ptr: u32, query_str_len: u32) u64;
+        pub extern "lunatic::sqlite" fn execute(conn_id: u64, exec_str_ptr: u32, exec_str_len: u32) u32;
+        pub extern "lunatic::sqlite" fn bind_value(statement_id: u64, bind_data_ptr: u32, bind_data_len: u32) void;
+        pub extern "lunatic::sqlite" fn sqlite3_changes(conn_id: u64) u32;
+        pub extern "lunatic::sqlite" fn statement_reset(statement_id: u64) void;
+        pub extern "lunatic::sqlite" fn last_error(conn_id: u64, opaque_ptr: u32) u32;
+        pub extern "lunatic::sqlite" fn sqlite3_finalize(statement_id: u64) void;
+        pub extern "lunatic::sqlite" fn sqlite3_step(statement_id: u64) u32;
+        pub extern "lunatic::sqlite" fn read_column(statement_id: u64, col_idx: u32, opaque_ptr: u32) u32;
+        pub extern "lunatic::sqlite" fn column_names(statement_id: u64, opaque_ptr: u32) u32;
+        pub extern "lunatic::sqlite" fn read_row(statement_id: u64, opaque_ptr: u32) u32;
+        pub extern "lunatic::sqlite" fn column_count(statement_id: u64) u32;
+        pub extern "lunatic::sqlite" fn column_name(statement_id: u64, column_idx: u32, opaque_ptr: u32) u32;
     };
     const Timer = struct {
         pub extern "lunatic::timer" fn send_after(process_id: u64, delay: u64) u64;

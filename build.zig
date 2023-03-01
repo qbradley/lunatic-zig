@@ -12,9 +12,17 @@ pub fn build(b: *std.Build) void {
         .preferred_optimize_mode = .ReleaseSmall,
     });
 
+    const bincode_zig = b.dependency("bincode-zig", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     b.addModule(.{
         .name = "lunatic-zig",
         .source_file = .{ .path = "src/lunatic.zig" },
+        .dependencies = &.{
+            .{ .name = "bincode-zig", .module = bincode_zig.module("bincode-zig") },
+        },
     });
 
     const exe = b.addExecutable(.{
@@ -29,6 +37,7 @@ pub fn build(b: *std.Build) void {
         "child2",
     };
     exe.addModule("lunatic-zig", b.modules.get("lunatic-zig").?);
+    exe.addModule("bincode-zig", bincode_zig.module("bincode-zig"));
     exe.install();
 
     const run_cmd = b.addSystemCommand(&.{
