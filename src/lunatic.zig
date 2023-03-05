@@ -6,9 +6,9 @@ const Allocator = std.mem.Allocator;
 pub export fn lunatic_alloc(size: u32) u32 {
     const allocator = std.heap.wasm_allocator;
     const slice = allocator.allocWithOptions(u8, size + 4, 4, null) catch unreachable;
-    const ptr = slice.ptr + 4;
     std.mem.writeIntLittle(u32, slice[0..4], slice.len);
-    std.debug.print("lunatic_alloc of size {}: {*}\n", .{ size, ptr });
+    //const ptr = slice.ptr + 4;
+    //std.debug.print("lunatic_alloc of size {}: {*}\n", .{ size, ptr });
     return @ptrToInt(slice.ptr + 4);
 }
 
@@ -17,8 +17,8 @@ pub export fn lunatic_free(raw_ptr: u32) void {
     const ptr = @intToPtr([*]u8, raw_ptr);
     const original_ptr = ptr - 4;
     const len = std.mem.readIntLittle(u32, original_ptr[0..4]);
-    const size = len - 4;
-    std.debug.print("lunatic_free of size {}: {*}\n", .{ size, ptr });
+    //const size = len - 4;
+    //std.debug.print("lunatic_free of size {}: {*}\n", .{ size, ptr });
     allocator.free(original_ptr[0..len]);
 }
 
@@ -103,7 +103,7 @@ pub const Node = struct {
             2 => return error.NodeDoesNotExist,
             9027 => return error.NodeConnectionError,
             else => {
-                std.debug.print("Send failed with error {}\n", .{result});
+                std.debug.print("Send_receive_skip_search failed with error {}\n", .{result});
                 return error.SendFailed;
             },
         }
@@ -287,7 +287,6 @@ pub const Message = struct {
     pub fn write_data(comptime T: type, value: T) void {
         const ptr = @ptrToInt(&value);
         const len = @sizeOf(T);
-        std.debug.print("write_data({})\n", .{len});
         const written = Internal.Message.write_data(ptr, len);
         if (written != len) {
             @panic("Unable to write all the data to the message");
@@ -319,7 +318,7 @@ pub const Message = struct {
             0 => return {},
             9027 => return error.Timeout,
             else => {
-                std.debug.print("Send failed with error {}\n", .{result});
+                std.debug.print("Send_receive_skip_search failed with error {}\n", .{result});
                 return error.SendFailed;
             },
         }
@@ -1189,6 +1188,45 @@ pub const Sqlite = struct {
     pub const Statement = struct {
         statement_id: u64,
 
+        fn unsupportedType(comptime T: type) noreturn {
+            @panic("Unsupported type " ++ @typeName(T));
+        }
+
+        pub fn bind_values_by_position(self: Statement, values: anytype) !void {
+            const ValuesType = @TypeOf(values);
+            const values_type_info = @typeInfo(ValuesType);
+            if (values_type_info != .Struct) {
+                @compileError("expected tuple or struct argument, found " ++ @typeName(ValuesType));
+            }
+
+            const fields = values_type_info.Struct.fields;
+            var value_array: [fields.len]BindPair = undefined;
+            inline for (fields, 0..) |field, index| {
+                var value: BindValue = switch (@typeInfo(field.type)) {
+                    .ComptimeInt, .Int => .{ .Int64 = @intCast(i64, @field(values, field.name)) },
+                    .ComptimeFloat, .Float => .{ .Double = @floatCast(f64, @field(values, field.name)) },
+                    .Array => |info| if (info.child == u8) .{ .Text = &@field(values, field.name) } else unsupportedType(field.type),
+                    .Pointer => |ptr| switch (ptr.size) {
+                        .One => switch (@typeInfo(ptr.child)) {
+                            .Array => |info| switch (info.child) {
+                                u8 => .{ .Text = @field(values, field.name)[0..] },
+                                else => unsupportedType(field.type),
+                            },
+                            else => unsupportedType(field.type),
+                        },
+                        .Slice => if (ptr.child == u8) .{ .Text = @field(values, field.name) } else unsupportedType(field.type),
+                        else => unsupportedType(field.type),
+                    },
+                    else => @panic("Unsupported type " ++ @typeName(field.type)),
+                };
+                value_array[index] = .{
+                    .key = .{ .Numeric = index + 1 },
+                    .value = value,
+                };
+            }
+            return self.bind_value(&value_array);
+        }
+
         pub fn bind_value(self: Statement, bindings: []const BindPair) !void {
             var buffer: [4096]u8 = undefined;
             var stream = std.io.fixedBufferStream(&buffer);
@@ -1212,6 +1250,41 @@ pub const Sqlite = struct {
 
             var stream = std.io.fixedBufferStream(ptr[0..len]);
             return try Bincode.deserialize(stream.reader(), allocator, []SqliteValue);
+        }
+
+        pub fn read_column(self: Statement, column: u32, allocator: Allocator) !Bincode.DeserializeResult(SqliteValue) {
+            var len: u32 = 0;
+            var raw_ptr = Internal.Sqlite.read_column(self.statement_id, column, @ptrToInt(&len));
+            defer lunatic_free(raw_ptr);
+            var ptr = @intToPtr([*]const u8, raw_ptr);
+
+            var stream = std.io.fixedBufferStream(ptr[0..len]);
+            return try Bincode.deserialize(stream.reader(), allocator, SqliteValue);
+        }
+
+        pub fn column_names(self: Statement, allocator: Allocator) !Bincode.DeserializeResult([]const []const u8) {
+            var len: u32 = 0;
+            var raw_ptr = Internal.Sqlite.column_names(self.statement_id, @ptrToInt(&len));
+            defer lunatic_free(raw_ptr);
+            var ptr = @intToPtr([*]const u8, raw_ptr);
+
+            var stream = std.io.fixedBufferStream(ptr[0..len]);
+            return try Bincode.deserialize(stream.reader(), allocator, []const []const u8);
+        }
+
+        // need to free result
+        pub fn column_name(self: Statement, column: u32, allocator: Allocator) ![]const u8 {
+            var len: u32 = 0;
+            var raw_ptr = Internal.Sqlite.column_name(self.statement_id, column, @ptrToInt(&len));
+            defer lunatic_free(raw_ptr);
+            var ptr = @intToPtr([*]const u8, raw_ptr);
+
+            return try std.fmt.allocPrint(allocator, "{s}", .{ptr[0..len]});
+        }
+
+        pub fn column_count(self: Statement) usize {
+            const count = Internal.Sqlite.column_count(self.statement_id);
+            return @intCast(usize, count);
         }
 
         pub fn reset(self: Statement) void {
