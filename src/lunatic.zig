@@ -1329,7 +1329,7 @@ pub const Sqlite = struct {
             var arena = Arena.init(allocator);
             var result = DeserializeResult(T){
                 .arena = arena,
-                .result = try bincode.deserialize(stream, arena.allocator(), T),
+                .result = try bincode.deserializeAlloc(stream, arena.allocator(), T),
             };
             return result;
         }
