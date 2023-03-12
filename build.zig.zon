@@ -4,8 +4,8 @@
 
     .dependencies = .{
         .@"bincode-zig" = .{
-            .url = "https://github.com/qbradley/bincode-zig/archive/22f9347ed1a0d275fbd49c58d5e76859c31962fc.tar.gz",
-            .hash = "12200f0952d5c962987e58dd204fa38d144af051f8aea76ba86d049265e6cad86430",
+            .url = "https://github.com/qbradley/bincode-zig/archive/42ca04a9e6fabf7a158187e2f3b575603d1c5677.tar.gz",
+            .hash = "1220fef76fcd31e70da6ec74dfdc2b38c45812c3f8b04fda8426d929402505ab8ebb",
         }
     },
 }

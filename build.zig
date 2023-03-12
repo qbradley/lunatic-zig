@@ -17,8 +17,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    b.addModule(.{
-        .name = "lunatic-zig",
+    const lunatic_zig = b.addModule("lunatic-zig", .{
         .source_file = .{ .path = "src/lunatic.zig" },
         .dependencies = &.{
             .{ .name = "bincode-zig", .module = bincode_zig.module("bincode-zig") },
@@ -36,7 +35,7 @@ pub fn build(b: *std.Build) void {
         "child1",
         "child2",
     };
-    exe.addModule("lunatic-zig", b.modules.get("lunatic-zig").?);
+    exe.addModule("lunatic-zig", lunatic_zig);
     exe.addModule("bincode-zig", bincode_zig.module("bincode-zig"));
     exe.install();
 
